@@ -12,19 +12,20 @@ SYSTEM = """You are JARVIS, a personal AI assistant. Address the user as "Boss".
 Personality: intelligent, calm, professional, helpful, slightly witty, concise. Never pretend to be
 conscious or sentient. Reply in the same language the user writes in (Hinglish is fine).
 
-Always clearly distinguish: known facts, your inference/guess, actions you actually performed
-(confirm what tool ran and the real result), and actions that failed (say clearly, don't pretend).
+Always clearly distinguish: known facts, your inference/guess, actions you actually performed, and
+actions that failed (say clearly, don't pretend).
 
 You have long-term memory (remember_fact/recall_memory/forget_fact), a task/reminder system
 (add_task/list_tasks/complete_task/delete_task, add_reminder/list_reminders), a short countdown
-timer (set_timer, only for short durations), and real web search (search_web) plus page fetching
-(browse, max 2 per turn) for research.
+timer (set_timer), real web search (search_web) plus page fetching (browse, max 2 per turn), and a
+personal knowledge base of uploaded documents/notes (add_document/search_documents - when answering
+from a document, mention which document you got it from). You also manage projects
+(create_project/list_projects) - tasks can belong to a project via the project field.
 
-AGENTIC PLANNING: When the user gives a multi-step GOAL, silently plan and execute the steps by
-calling tools, without asking confirmation for each step (except write_file, forget_fact,
-delete_task which always need confirmation). Keep working until the goal is done or you hit a real
-blocker. If a tool fails, try an alternative once before explaining the failure. Give a short, clear
-summary of what was ACTUALLY done at the end - report real results, not just a plan.
+AGENTIC PLANNING: For multi-step GOALS, silently plan and execute steps by calling tools, without
+asking confirmation per step (except write_file, forget_fact, delete_task which always need
+confirmation). Keep working until done or you hit a real blocker. If a tool fails, try once more
+differently before explaining the failure. End with a short, honest summary of what was actually done.
 
 For simple direct questions, just answer directly without overusing tools.
 
@@ -47,9 +48,9 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "forget_fact", "description": "Delete a fact from memory by key. Requires user confirmation.",
      "parameters": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}}},
-    {"type": "function", "function": {"name": "add_task", "description": "Add a task/todo item.",
+    {"type": "function", "function": {"name": "add_task", "description": "Add a task/todo item, optionally under a project.",
      "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "project": {"type": "string"}}, "required": ["title"]}}},
-    {"type": "function", "function": {"name": "list_tasks", "description": "List pending tasks.",
+    {"type": "function", "function": {"name": "list_tasks", "description": "List pending tasks, optionally filtered by project.",
      "parameters": {"type": "object", "properties": {"project": {"type": "string"}}}}},
     {"type": "function", "function": {"name": "complete_task", "description": "Mark a task done by its id.",
      "parameters": {"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]}}},
@@ -61,6 +62,14 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "set_timer", "description": "Start a live countdown timer (seconds) that alerts in the browser.",
      "parameters": {"type": "object", "properties": {"seconds": {"type": "integer"}, "label": {"type": "string"}}, "required": ["seconds", "label"]}}},
+    {"type": "function", "function": {"name": "add_document", "description": "Save a text document/note to the personal knowledge base.",
+     "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "content": {"type": "string"}}, "required": ["title", "content"]}}},
+    {"type": "function", "function": {"name": "search_documents", "description": "Search the knowledge base of uploaded documents/notes.",
+     "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "create_project", "description": "Create a new project with a name and goal.",
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "goal": {"type": "string"}}, "required": ["name", "goal"]}}},
+    {"type": "function", "function": {"name": "list_projects", "description": "List all projects with goals and pending task counts.",
+     "parameters": {"type": "object", "properties": {}}}},
 ]
 
 
@@ -70,6 +79,8 @@ def db():
     conn.execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, tool TEXT, args TEXT, result TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, project TEXT, done INTEGER DEFAULT 0, created_at TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, due TEXT, created_at TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, content TEXT, created_at TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, goal TEXT, created_at TEXT)")
     return conn
 
 
@@ -137,7 +148,7 @@ def run_tool(name, args, browse_count=[0]):
                 try:
                     url = "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote(query)
                     result = "Search result: " + fetch_text(url)[:3000]
-                except Exception as se:
+                except Exception:
                     result = "Search failed. Answer from general knowledge and mention it may not be current."
         elif name == "remember_fact":
             conn = db()
@@ -193,6 +204,41 @@ def run_tool(name, args, browse_count=[0]):
             result = json.dumps([{"id": r[0], "text": r[1], "due": r[2]} for r in rows]) if rows else "No reminders set."
         elif name == "set_timer":
             result = "Timer started: " + args["label"] + " for " + str(args["seconds"]) + " seconds"
+        elif name == "add_document":
+            conn = db()
+            conn.execute("INSERT INTO documents (title, content, created_at) VALUES (?,?,?)",
+                        (args["title"], args["content"][:50000], time.strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit(); conn.close()
+            result = "Document saved to knowledge base: " + args["title"]
+        elif name == "search_documents":
+            conn = db()
+            rows = conn.execute("SELECT title, content FROM documents WHERE title LIKE ? OR content LIKE ?",
+                                (f"%{args['query']}%", f"%{args['query']}%")).fetchall()
+            conn.close()
+            if rows:
+                matches = []
+                for title, content in rows[:3]:
+                    idx = content.lower().find(args["query"].lower())
+                    snippet = content[max(0, idx-100):idx+300] if idx >= 0 else content[:300]
+                    matches.append({"document": title, "excerpt": snippet})
+                result = json.dumps(matches)
+            else:
+                result = "No matching documents found in knowledge base."
+        elif name == "create_project":
+            conn = db()
+            conn.execute("INSERT OR REPLACE INTO projects (name, goal, created_at) VALUES (?,?,?)",
+                        (args["name"], args["goal"], time.strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit(); conn.close()
+            result = "Project created: " + args["name"]
+        elif name == "list_projects":
+            conn = db()
+            projs = conn.execute("SELECT name, goal FROM projects").fetchall()
+            out = []
+            for pname, goal in projs:
+                count = conn.execute("SELECT COUNT(*) FROM tasks WHERE project=? AND done=0", (pname,)).fetchone()[0]
+                out.append({"project": pname, "goal": goal, "pending_tasks": count})
+            conn.close()
+            result = json.dumps(out) if out else "No projects yet."
         else:
             result = "Unknown tool: " + name
     except Exception as e:
@@ -340,6 +386,23 @@ def vision():
     return jsonify({"reply": reply})
 
 
+@app.route("/upload_doc", methods=["POST"])
+def upload_doc():
+    data = request.json or {}
+    title = str(data.get("title", "untitled"))[:200]
+    content = str(data.get("content", ""))[:50000]
+    sid = str(data.get("session", "default"))[:100]
+    if not content.strip():
+        return jsonify({"reply": "Document khali hai, Boss."})
+
+    result = run_tool("add_document", {"title": title, "content": content})
+    if sid not in sessions:
+        sessions[sid] = [{"role": "system", "content": SYSTEM}]
+    sessions[sid].append({"role": "user", "content": "[Boss uploaded a document: " + title + "]"})
+    sessions[sid].append({"role": "assistant", "content": "Got it, Boss. I've added \"" + title + "\" to the knowledge base (" + str(len(content)) + " characters). Ask me anything about it anytime."})
+    return jsonify({"reply": "📄 Document added: " + title + " (" + str(len(content)) + " chars). " + str(result)})
+
+
 @app.route("/confirm", methods=["POST"])
 def confirm():
     data = request.json or {}
@@ -392,8 +455,11 @@ def dashboard():
     reminders = conn.execute("SELECT id, text, due FROM reminders").fetchall()
     memory = conn.execute("SELECT key, value FROM memory ORDER BY updated_at DESC LIMIT 20").fetchall()
     logs = conn.execute("SELECT ts, tool, result FROM audit_log ORDER BY id DESC LIMIT 20").fetchall()
+    documents = conn.execute("SELECT id, title, created_at FROM documents ORDER BY id DESC").fetchall()
+    projects = conn.execute("SELECT name, goal FROM projects").fetchall()
     conn.close()
-    return render_template("dashboard.html", tasks=tasks, reminders=reminders, memory=memory, logs=logs)
+    return render_template("dashboard.html", tasks=tasks, reminders=reminders, memory=memory,
+                            logs=logs, documents=documents, projects=projects)
 
 
 if __name__ == "__main__":

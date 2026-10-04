@@ -41,7 +41,7 @@
 <header><h1>🤖 JARVIS</h1><p>Your Personal AI Assistant — <a href="/dashboard">Dashboard</a></p></header>
 <div class="badges">
   <span class="badge">CORE ✓</span><span class="badge">MEMORY ✓</span><span class="badge">VOICE ✓</span>
-  <span class="badge">VISION ✓</span><span class="badge">WEB ✓</span><span class="badge">TOOLS ✓</span>
+  <span class="badge">VISION ✓</span><span class="badge">WEB ✓</span><span class="badge">KB ✓</span><span class="badge">PROJECTS ✓</span>
 </div>
 <div id="voiceToggle"><label><input type="checkbox" id="autoSpeak" checked> Jarvis bole jawab zor se</label></div>
 <div id="voiceStatus"></div>
@@ -50,6 +50,8 @@
   <input id="inputBox" placeholder="Type a message..." autocomplete="off">
   <button id="imgBtn" title="Share image">📷</button>
   <input type="file" id="imgInput" accept="image/*" capture="environment">
+  <button id="docBtn" title="Upload document">📄</button>
+  <input type="file" id="docInput" accept=".txt,.md">
   <button id="micBtn" title="Speak">🎤</button>
   <button id="sendBtn">Send</button>
 </div>
@@ -60,6 +62,8 @@ const sendBtn = document.getElementById('sendBtn');
 const micBtn = document.getElementById('micBtn');
 const imgBtn = document.getElementById('imgBtn');
 const imgInput = document.getElementById('imgInput');
+const docBtn = document.getElementById('docBtn');
+const docInput = document.getElementById('docInput');
 const autoSpeak = document.getElementById('autoSpeak');
 const voiceStatus = document.getElementById('voiceStatus');
 const session = 'sess_' + Math.random().toString(36).slice(2);
@@ -214,6 +218,32 @@ imgInput.onchange = (e) => {
     img.src = ev.target.result;
   };
   reader.readAsDataURL(file);
+};
+
+docBtn.onclick = () => docInput.click();
+docInput.onchange = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async (ev) => {
+    const text = ev.target.result;
+    addMsg('📄 Uploading document: ' + file.name, 'user');
+    const loading = addThinking();
+    try {
+      const res = await fetch('/upload_doc', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({title: file.name, content: text, session: session})
+      });
+      const data = await res.json();
+      loading.classList.remove('thinking');
+      loading.textContent = data.reply;
+      speakText(data.reply);
+    } catch (err) {
+      loading.classList.remove('thinking');
+      loading.textContent = 'Upload error.';
+    }
+  };
+  reader.readAsText(file);
 };
 
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;

@@ -18,6 +18,11 @@
 <p><a href="/">← Back to chat</a></p>
 
 <div class="card">
+<h2>🏗️ Projects</h2>
+{% for p in projects %}<div class="item"><b>{{p[0]}}</b> — {{p[1]}}</div>{% else %}<div class="item">No projects yet.</div>{% endfor %}
+</div>
+
+<div class="card">
 <h2>📋 Pending Tasks</h2>
 {% for t in tasks %}<div class="item">#{{t[0]}} — {{t[1]}} ({{t[2]}})</div>{% else %}<div class="item">No tasks.</div>{% endfor %}
 </div>
@@ -25,6 +30,11 @@
 <div class="card">
 <h2>⏰ Reminders</h2>
 {% for r in reminders %}<div class="item">#{{r[0]}} — {{r[1]}} @ {{r[2]}}</div>{% else %}<div class="item">No reminders.</div>{% endfor %}
+</div>
+
+<div class="card">
+<h2>📄 Knowledge Base Documents</h2>
+{% for d in documents %}<div class="item">#{{d[0]}} — {{d[1]}} ({{d[2]}})</div>{% else %}<div class="item">No documents uploaded yet.</div>{% endfor %}
 </div>
 
 <div class="card">
