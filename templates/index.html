@@ -246,6 +246,48 @@ docInput.onchange = (e) => {
   reader.readAsText(file);
 };
 
+// Restore conversation history on page load
+(async function restoreHistory() {
+  try {
+    const res = await fetch('/history', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session: session})
+    });
+    const data = await res.json();
+    if (data.history && data.history.length > 0) {
+      const box = document.getElementById('chatBox') || document.getElementById('chat') || document.getElementById('messages') || document.querySelector('.chat-box') || document.querySelector('.messages');
+      if (box) box.innerHTML = '';
+      data.history.forEach(m => addMsg(m.content, m.role === 'user' ? 'user' : 'bot'));
+    }
+  } catch (err) { /* keep default greeting */ }
+})();
+
+// Proactive reminder toast
+function showToast(text) {
+  const toast = document.createElement('div');
+  toast.textContent = '⏰ ' + text;
+  toast.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#1a1a2e;color:#00d2ff;padding:12px 20px;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.5);z-index:9999;font-size:14px;max-width:90%;text-align:center;border:1px solid #00d2ff;';
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 8000);
+}
+
+setInterval(async () => {
+  try {
+    const res = await fetch('/check_reminders', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session: session})
+    });
+    const data = await res.json();
+    if (data.due && data.due.length > 0) {
+      data.due.forEach(r => {
+        showToast(r.text);
+        addMsg('⏰ Reminder, Boss: ' + r.text, 'bot');
+        if (typeof speakText === 'function') speakText('Boss, reminder: ' + r.text);
+      });
+    }
+  } catch (err) { /* ignore */ }
+}, 30000);
+
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 if (SR) {
   const recog = new SR();

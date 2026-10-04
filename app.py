@@ -24,6 +24,10 @@ Use list_documents to see what documents exist. When answering from a document, 
 document you got it from. You also manage projects (create_project/list_projects) - tasks can
 belong to a project via the project field.
 
+TIME AWARENESS: Each user message is preceded by the current real date and time. Use it to resolve
+relative times like "tomorrow", "tonight", "in 2 hours". When calling add_reminder, always set "due"
+in the exact format YYYY-MM-DD HH:MM (24-hour), computed from the current date-time given to you.
+
 AGENTIC PLANNING: For multi-step GOALS, silently plan and execute steps by calling tools, without
 asking confirmation per step (except write_file, forget_fact, delete_task which always need
 confirmation). Keep working until done or you hit a real blocker. If a tool fails, try once more
@@ -82,9 +86,14 @@ def db():
     conn.execute("CREATE TABLE IF NOT EXISTS memory (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, tool TEXT, args TEXT, result TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, project TEXT, done INTEGER DEFAULT 0, created_at TEXT)")
-    conn.execute("CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, due TEXT, created_at TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, due TEXT, created_at TEXT, notified INTEGER DEFAULT 0)")
     conn.execute("CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, content TEXT, created_at TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, goal TEXT, created_at TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS conversation_history (id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT, role TEXT, content TEXT, ts TEXT)")
+    try:
+        conn.execute("ALTER TABLE reminders ADD COLUMN notified INTEGER DEFAULT 0")
+    except Exception:
+        pass
     return conn
 
 
@@ -93,6 +102,16 @@ def log_action(tool, args, result):
         conn = db()
         conn.execute("INSERT INTO audit_log (ts, tool, args, result) VALUES (?,?,?,?)",
                       (time.strftime("%Y-%m-%d %H:%M:%S"), tool, json.dumps(args)[:500], str(result)[:500]))
+        conn.commit(); conn.close()
+    except Exception:
+        pass
+
+
+def save_message(session, role, content):
+    try:
+        conn = db()
+        conn.execute("INSERT INTO conversation_history (session, role, content, ts) VALUES (?,?,?,?)",
+                      (session, role, content[:4000], time.strftime("%Y-%m-%d %H:%M:%S")))
         conn.commit(); conn.close()
     except Exception:
         pass
@@ -323,6 +342,8 @@ def chat():
         sessions[sid] = [{"role": "system", "content": SYSTEM}]
     messages = sessions[sid]
     messages.append({"role": "user", "content": user_msg})
+    messages.append({"role": "system", "content": "Current date-time: " + time.strftime("%Y-%m-%d %H:%M (%A)")})
+    save_message(sid, "user", user_msg)
     replies = []
     timer_info = None
     confirm_info = None
@@ -368,6 +389,8 @@ def chat():
     except Exception as e:
         return jsonify({"reply": "Error: " + str(e)})
 
+    if replies:
+        save_message(sid, "assistant", "\n\n".join(replies))
     out = {"reply": "\n\n".join(replies) or "(no reply)"}
     if timer_info:
         out["timer"] = timer_info
@@ -460,6 +483,35 @@ def confirm():
         return jsonify({"reply": "Error: " + str(e)})
 
     return jsonify({"reply": "\n\n".join(replies) or str(result)})
+
+
+@app.route("/history", methods=["POST"])
+def history():
+    data = request.json or {}
+    sid = str(data.get("session", "default"))[:100]
+    conn = db()
+    rows = conn.execute("SELECT role, content FROM conversation_history WHERE session=? ORDER BY id ASC LIMIT 50", (sid,)).fetchall()
+    conn.close()
+    return jsonify({"history": [{"role": r[0], "content": r[1]} for r in rows]})
+
+
+@app.route("/check_reminders", methods=["POST"])
+def check_reminders():
+    conn = db()
+    rows = conn.execute("SELECT id, text, due FROM reminders WHERE notified=0").fetchall()
+    now = time.strftime("%Y-%m-%d %H:%M")
+    due_now = []
+    for rid, text, due in rows:
+        try:
+            if due and due[:16] <= now:
+                due_now.append({"id": rid, "text": text, "due": due})
+        except Exception:
+            pass
+    if due_now:
+        conn.executemany("UPDATE reminders SET notified=1 WHERE id=?", [(d["id"],) for d in due_now])
+        conn.commit()
+    conn.close()
+    return jsonify({"due": due_now})
 
 
 @app.route("/dashboard")
