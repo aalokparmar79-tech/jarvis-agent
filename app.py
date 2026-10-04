@@ -1,4 +1,4 @@
-import os, re, json, time, sqlite3, subprocess, urllib.request, urllib.error
+import os, re, json, time, sqlite3, urllib.request, urllib.error
 from flask import Flask, request, jsonify, render_template
 
 MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
@@ -9,19 +9,21 @@ SYSTEM = """You are JARVIS, a personal AI assistant. Address the user as "Boss".
 Personality: intelligent, calm, professional, helpful, slightly witty, concise. Never pretend to be
 conscious or sentient. Reply in the same language the user writes in (Hinglish is fine).
 
-Always clearly distinguish, in your own wording when relevant:
-- Known facts (from memory or tool results)
-- Your inference/guess (say "I think" / "mujhe lagta hai")
-- Actions you actually performed (confirm what tool ran and its real result)
-- Actions that failed (say clearly it failed, don't pretend success)
+Always clearly distinguish: known facts, your inference/guess, actions you actually performed
+(confirm what tool ran and the real result), and actions that failed (say clearly, don't pretend).
 
-You have long-term memory. Use the remember_fact tool to save important facts the user tells you
-(name, preferences, ongoing projects, deadlines). Use recall_memory to check what you already know
-before answering personal questions. Don't save sensitive secrets (passwords, keys) to memory.
+You have long-term memory (remember_fact/recall_memory/forget_fact) and a task/reminder system
+(add_task/list_tasks/complete_task/delete_task, add_reminder/list_reminders). Use them proactively
+when the user mentions things to remember, do, or be reminded about.
+
+Before doing a destructive action (delete_task, forget_fact, overwrite an existing file), briefly
+state what you're about to do in your reply. Don't silently destroy data.
 
 Knowledge base (Bot Development Guide):
-- Bot = automated program doing tasks without a human. Types: chatbots, automation bots, trading
-  bots, AI bots, voice bots, game bots. Learn Python first. Playwright recommended for web automation.
+- Bot = automated program doing tasks without a human. Chatbots, automation bots (Selenium,
+  Playwright), trading bots, AI bots, voice bots, game bots. Learn Python first.
+- Steps for any bot: 1) define goal, 2) pick platform, 3) find right tech, 4) automate GUI if no API.
+- Playwright recommended for web automation.
 
 Rules:
 - Only help with legitimate automation (own accounts, public data, official APIs).
@@ -35,21 +37,36 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
     {"type": "function", "function": {"name": "browse", "description": "Fetch a public web page and return readable text.",
      "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}}},
-    {"type": "function", "function": {"name": "remember_fact", "description": "Save an important fact about the user/project to long-term memory.",
+    {"type": "function", "function": {"name": "remember_fact", "description": "Save an important fact to long-term memory.",
      "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
     {"type": "function", "function": {"name": "recall_memory", "description": "Search long-term memory for relevant facts.",
      "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
-    {"type": "function", "function": {"name": "forget_fact", "description": "Delete a fact from long-term memory by key.",
+    {"type": "function", "function": {"name": "forget_fact", "description": "Delete a fact from memory by key.",
      "parameters": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}}},
+    {"type": "function", "function": {"name": "add_task", "description": "Add a task/todo item.",
+     "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "project": {"type": "string"}}, "required": ["title"]}}},
+    {"type": "function", "function": {"name": "list_tasks", "description": "List all pending tasks, optionally filtered by project.",
+     "parameters": {"type": "object", "properties": {"project": {"type": "string"}}}}},
+    {"type": "function", "function": {"name": "complete_task", "description": "Mark a task as done by its id.",
+     "parameters": {"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]}}},
+    {"type": "function", "function": {"name": "delete_task", "description": "Delete a task by its id.",
+     "parameters": {"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]}}},
+    {"type": "function", "function": {"name": "add_reminder", "description": "Add a reminder with a due time description.",
+     "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "due": {"type": "string"}}, "required": ["text", "due"]}}},
+    {"type": "function", "function": {"name": "list_reminders", "description": "List all reminders.",
+     "parameters": {"type": "object", "properties": {}}}},
 ]
 
 
 def db():
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("""CREATE TABLE IF NOT EXISTS memory
-                     (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)""")
+    conn.execute("CREATE TABLE IF NOT EXISTS memory (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
     conn.execute("""CREATE TABLE IF NOT EXISTS audit_log
                      (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, tool TEXT, args TEXT, result TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS tasks
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, project TEXT, done INTEGER DEFAULT 0, created_at TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS reminders
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, due TEXT, created_at TEXT)""")
     return conn
 
 
@@ -87,8 +104,7 @@ def run_tool(name, args):
             conn = db()
             conn.execute("INSERT OR REPLACE INTO memory (key, value, updated_at) VALUES (?,?,?)",
                          (args["key"], args["value"], time.strftime("%Y-%m-%d %H:%M:%S")))
-            conn.commit()
-            conn.close()
+            conn.commit(); conn.close()
             result = "Remembered: " + args["key"]
         elif name == "recall_memory":
             conn = db()
@@ -99,9 +115,43 @@ def run_tool(name, args):
         elif name == "forget_fact":
             conn = db()
             conn.execute("DELETE FROM memory WHERE key = ?", (args["key"],))
-            conn.commit()
-            conn.close()
+            conn.commit(); conn.close()
             result = "Forgot: " + args["key"]
+        elif name == "add_task":
+            conn = db()
+            conn.execute("INSERT INTO tasks (title, project, done, created_at) VALUES (?,?,0,?)",
+                        (args["title"], args.get("project", "general"), time.strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit(); conn.close()
+            result = "Task added: " + args["title"]
+        elif name == "list_tasks":
+            conn = db()
+            if args.get("project"):
+                rows = conn.execute("SELECT id, title, project, done FROM tasks WHERE project=? AND done=0", (args["project"],)).fetchall()
+            else:
+                rows = conn.execute("SELECT id, title, project, done FROM tasks WHERE done=0").fetchall()
+            conn.close()
+            result = json.dumps([{"id": r[0], "title": r[1], "project": r[2]} for r in rows]) if rows else "No pending tasks."
+        elif name == "complete_task":
+            conn = db()
+            conn.execute("UPDATE tasks SET done=1 WHERE id=?", (args["task_id"],))
+            conn.commit(); conn.close()
+            result = "Task marked done: #" + str(args["task_id"])
+        elif name == "delete_task":
+            conn = db()
+            conn.execute("DELETE FROM tasks WHERE id=?", (args["task_id"],))
+            conn.commit(); conn.close()
+            result = "Task deleted: #" + str(args["task_id"])
+        elif name == "add_reminder":
+            conn = db()
+            conn.execute("INSERT INTO reminders (text, due, created_at) VALUES (?,?,?)",
+                        (args["text"], args["due"], time.strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit(); conn.close()
+            result = "Reminder set: " + args["text"] + " @ " + args["due"]
+        elif name == "list_reminders":
+            conn = db()
+            rows = conn.execute("SELECT id, text, due FROM reminders").fetchall()
+            conn.close()
+            result = json.dumps([{"id": r[0], "text": r[1], "due": r[2]} for r in rows]) if rows else "No reminders set."
         else:
             result = "Unknown tool: " + name
     except Exception as e:
@@ -137,7 +187,7 @@ def chat():
     ip = request.remote_addr
     now = time.time()
     if ip in last_request_time and now - last_request_time[ip] < RATE_LIMIT_SECONDS:
-        return jsonify({"reply": "Thoda slow, Boss. Ek message bhej ke thoda ruko."}), 429
+        return jsonify({"reply": "Thoda slow, Boss."}), 429
     last_request_time[ip] = now
 
     data = request.json or {}
@@ -152,7 +202,7 @@ def chat():
     messages.append({"role": "user", "content": user_msg})
     replies = []
     try:
-        for _ in range(6):
+        for _ in range(8):
             resp = call_api(messages)
             msg = resp["choices"][0]["message"]
             messages.append(msg)
@@ -171,12 +221,15 @@ def chat():
     return jsonify({"reply": "\n\n".join(replies) or "(no reply)"})
 
 
-@app.route("/memory")
-def view_memory():
+@app.route("/dashboard")
+def dashboard():
     conn = db()
-    rows = conn.execute("SELECT key, value, updated_at FROM memory ORDER BY updated_at DESC").fetchall()
+    tasks = conn.execute("SELECT id, title, project FROM tasks WHERE done=0").fetchall()
+    reminders = conn.execute("SELECT id, text, due FROM reminders").fetchall()
+    memory = conn.execute("SELECT key, value FROM memory ORDER BY updated_at DESC LIMIT 20").fetchall()
+    logs = conn.execute("SELECT ts, tool, result FROM audit_log ORDER BY id DESC LIMIT 20").fetchall()
     conn.close()
-    return jsonify([{"key": k, "value": v, "updated": u} for k, v, u in rows])
+    return render_template("dashboard.html", tasks=tasks, reminders=reminders, memory=memory, logs=logs)
 
 
 if __name__ == "__main__":
