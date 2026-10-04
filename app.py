@@ -19,9 +19,12 @@ You have long-term memory (remember_fact/recall_memory/forget_fact), a task/remi
 timer (set_timer, only for short durations like seconds/minutes), and real web search (search_web)
 plus page fetching (browse) for research.
 
-Some actions (overwriting a file, forgetting a memory, deleting a task) require user confirmation -
-the system will automatically pause and ask the user before running them, so just call the tool
-normally and explain why you want to do it.
+Some actions (overwriting a file, forgetting a memory, deleting a task) require user confirmation.
+IMPORTANT: You must still actually CALL the tool (write_file, forget_fact, delete_task) when the user
+asks for it - do NOT just describe it in text and wait. The system automatically intercepts these
+specific tool calls and shows a Yes/No confirmation button to the user before really executing them.
+If you only describe the action in text without calling the tool, nothing will happen. So always call
+the tool itself, then briefly explain what you're doing in the same turn.
 
 Knowledge base (Bot Development Guide):
 - Bot = automated program doing tasks without a human. Chatbots, automation bots (Selenium,
@@ -87,7 +90,7 @@ def log_action(tool, args, result):
 
 def fetch_text(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    html = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "ignore")
+    html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8", "ignore")
     html = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html)
     text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
     return text
@@ -110,8 +113,11 @@ def run_tool(name, args):
                 result = fetch_text(args["url"])[:15000]
         elif name == "search_web":
             q = urllib.parse.quote(args["query"])
-            url = "https://html.duckduckgo.com/html/?q=" + q
-            result = fetch_text(url)[:8000]
+            url = "https://lite.duckduckgo.com/lite/?q=" + q
+            try:
+                result = fetch_text(url)[:5000]
+            except Exception as se:
+                result = "Search failed (timeout or blocked): " + str(se)
         elif name == "remember_fact":
             conn = db()
             conn.execute("INSERT OR REPLACE INTO memory (key, value, updated_at) VALUES (?,?,?)",
@@ -219,7 +225,7 @@ def chat():
     timer_info = None
     confirm_info = None
     try:
-        for _ in range(8):
+        for _ in range(5):
             resp = call_api(messages)
             msg = resp["choices"][0]["message"]
             messages.append(msg)
