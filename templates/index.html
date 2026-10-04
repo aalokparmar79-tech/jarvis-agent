@@ -126,6 +126,15 @@ async function send() {
     speakText(data.reply);
     if (data.timer) startTimer(data.timer.seconds, data.timer.label);
     if (data.confirm) showConfirm(loading, data.confirm);
+    if (data.steps && data.steps.length) {
+      const s = document.createElement('div');
+      s.style.fontSize = '11px';
+      s.style.color = '#7fd';
+      s.style.opacity = '0.8';
+      s.style.marginTop = '6px';
+      s.textContent = '⚙ Steps: ' + data.steps.join(' → ');
+      loading.appendChild(s);
+    }
   } catch (e) {
     loading.textContent = 'Connection error.';
   }

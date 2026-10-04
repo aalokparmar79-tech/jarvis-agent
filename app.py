@@ -19,6 +19,16 @@ You have long-term memory (remember_fact/recall_memory/forget_fact), a task/remi
 timer (set_timer, only for short durations like seconds/minutes), and real web search (search_web)
 plus page fetching (browse) for research.
 
+AGENTIC PLANNING: When the user gives you a multi-step GOAL (not just a simple question), silently
+plan the steps needed and execute them one by one by calling tools, without asking the user to
+confirm each individual step (except the specific actions that always need confirmation: write_file,
+forget_fact, delete_task). Keep working through the steps in the same turn until the goal is done or
+you hit a real blocker. If a tool call fails, try an alternative approach once before giving up and
+explaining the failure clearly to the user. When finished, give a short, clear summary of what was
+actually done - don't just describe a plan, report real results.
+
+For simple direct questions, just answer directly without overusing tools.
+
 Some actions (overwriting a file, forgetting a memory, deleting a task) require user confirmation.
 IMPORTANT: You must still actually CALL the tool (write_file, forget_fact, delete_task) when the user
 asks for it - do NOT just describe it in text and wait. The system automatically intercepts these
@@ -224,8 +234,10 @@ def chat():
     replies = []
     timer_info = None
     confirm_info = None
+    steps_taken = []
+    MAX_STEPS = 10
     try:
-        for _ in range(5):
+        for step_num in range(MAX_STEPS):
             resp = call_api(messages)
             msg = resp["choices"][0]["message"]
             messages.append(msg)
@@ -252,12 +264,15 @@ def chat():
                                       "content": "[Skipped - waiting for a prior confirmation]"})
                 else:
                     result = run_tool(fn["name"], args)
+                    steps_taken.append(fn["name"])
                     if fn["name"] == "set_timer":
                         timer_info = {"seconds": args["seconds"], "label": args["label"]}
                     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
 
             if paused:
                 break
+        else:
+            replies.append("Boss, ye task bahut lamba ho gaya (10 steps complete). Jo ho saka kiya maine, thoda chhota goal do to aage continue kar sakta hoon.")
     except Exception as e:
         return jsonify({"reply": "Error: " + str(e)})
 
@@ -266,6 +281,8 @@ def chat():
         out["timer"] = timer_info
     if confirm_info:
         out["confirm"] = confirm_info
+    if steps_taken:
+        out["steps"] = steps_taken
     return jsonify(out)
 
 
