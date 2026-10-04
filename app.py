@@ -18,9 +18,11 @@ actions that failed (say clearly, don't pretend).
 You have long-term memory (remember_fact/recall_memory/forget_fact), a task/reminder system
 (add_task/list_tasks/complete_task/delete_task, add_reminder/list_reminders), a short countdown
 timer (set_timer), real web search (search_web) plus page fetching (browse, max 2 per turn), and a
-personal knowledge base of uploaded documents/notes (add_document/search_documents - when answering
-from a document, mention which document you got it from). You also manage projects
-(create_project/list_projects) - tasks can belong to a project via the project field.
+personal knowledge base of uploaded documents/notes. IMPORTANT: documents are stored in a database,
+NOT as files - to find info in them, ALWAYS use search_documents (never try read_file for documents).
+Use list_documents to see what documents exist. When answering from a document, mention which
+document you got it from. You also manage projects (create_project/list_projects) - tasks can
+belong to a project via the project field.
 
 AGENTIC PLANNING: For multi-step GOALS, silently plan and execute steps by calling tools, without
 asking confirmation per step (except write_file, forget_fact, delete_task which always need
@@ -64,8 +66,10 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"seconds": {"type": "integer"}, "label": {"type": "string"}}, "required": ["seconds", "label"]}}},
     {"type": "function", "function": {"name": "add_document", "description": "Save a text document/note to the personal knowledge base.",
      "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "content": {"type": "string"}}, "required": ["title", "content"]}}},
-    {"type": "function", "function": {"name": "search_documents", "description": "Search the knowledge base of uploaded documents/notes.",
+    {"type": "function", "function": {"name": "search_documents", "description": "Search the knowledge base of uploaded documents/notes using keywords.",
      "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "list_documents", "description": "List titles of all documents in the knowledge base.",
+     "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "create_project", "description": "Create a new project with a name and goal.",
      "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "goal": {"type": "string"}}, "required": ["name", "goal"]}}},
     {"type": "function", "function": {"name": "list_projects", "description": "List all projects with goals and pending task counts.",
@@ -212,18 +216,28 @@ def run_tool(name, args, browse_count=[0]):
             result = "Document saved to knowledge base: " + args["title"]
         elif name == "search_documents":
             conn = db()
-            rows = conn.execute("SELECT title, content FROM documents WHERE title LIKE ? OR content LIKE ?",
-                                (f"%{args['query']}%", f"%{args['query']}%")).fetchall()
+            all_docs = conn.execute("SELECT title, content FROM documents").fetchall()
             conn.close()
-            if rows:
-                matches = []
-                for title, content in rows[:3]:
-                    idx = content.lower().find(args["query"].lower())
-                    snippet = content[max(0, idx-100):idx+300] if idx >= 0 else content[:300]
-                    matches.append({"document": title, "excerpt": snippet})
-                result = json.dumps(matches)
+            keywords = [w.lower() for w in re.findall(r"\w+", args["query"]) if len(w) > 2]
+            scored = []
+            for title, content in all_docs:
+                lc = content.lower()
+                score = sum(lc.count(kw) for kw in keywords) + (5 if any(kw in title.lower() for kw in keywords) else 0)
+                if score > 0:
+                    best_kw = max(keywords, key=lambda k: lc.count(k)) if keywords else ""
+                    idx = lc.find(best_kw) if best_kw else 0
+                    snippet = content[max(0, idx-100):idx+400] if idx >= 0 else content[:400]
+                    scored.append((score, title, snippet))
+            scored.sort(reverse=True, key=lambda x: x[0])
+            if scored:
+                result = json.dumps([{"document": t, "excerpt": s} for _, t, s in scored[:3]])
             else:
-                result = "No matching documents found in knowledge base."
+                result = "No matching documents found for keywords: " + ", ".join(keywords) + ". Use list_documents to see what's available."
+        elif name == "list_documents":
+            conn = db()
+            rows = conn.execute("SELECT id, title, length(content) FROM documents ORDER BY id DESC").fetchall()
+            conn.close()
+            result = json.dumps([{"id": r[0], "title": r[1], "size_chars": r[2]} for r in rows]) if rows else "No documents in knowledge base yet."
         elif name == "create_project":
             conn = db()
             conn.execute("INSERT OR REPLACE INTO projects (name, goal, created_at) VALUES (?,?,?)",
