@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis Login</title>
+<style>
+  body { margin:0; font-family:sans-serif; background:linear-gradient(135deg,#0f0c29,#302b63,#24243e); color:#eee; display:flex; align-items:center; justify-content:center; height:100vh; }
+  .box { background:rgba(255,255,255,0.08); padding:40px; border-radius:16px; text-align:center; width:300px; }
+  h1 { margin-top:0; background:linear-gradient(90deg,#00d2ff,#3a7bd5); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+  input { width:100%; padding:12px; margin:10px 0; border-radius:8px; border:none; font-size:16px; box-sizing:border-box; }
+  button { width:100%; padding:12px; border-radius:8px; border:none; background:linear-gradient(135deg,#3a7bd5,#00d2ff); color:#fff; font-size:16px; cursor:pointer; }
+  .err { color:#ff6b6b; font-size:13px; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>🤖 JARVIS</h1>
+  <form method="POST">
+    <input type="password" name="password" placeholder="Enter password" required>
+    {% if error %}<p class="err">{{ error }}</p>{% endif %}
+    <button type="submit">Login</button>
+  </form>
+</div>
+</body>
+</html>

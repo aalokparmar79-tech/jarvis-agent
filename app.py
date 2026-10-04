@@ -1,49 +1,30 @@
 import os, re, json, subprocess, urllib.request, urllib.error
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, session, redirect, url_for
 
 MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 API_KEY = os.environ.get("GROQ_API_KEY")
+JARVIS_PASSWORD = os.environ.get("JARVIS_PASSWORD", "changeme123")
 
-SYSTEM = """You are Jarvis, an autonomous AI agent running on the user's own device via Termux.
-Reply in the same language the user writes in (Hinglish is fine).
+SYSTEM = """You are Jarvis, a personal AI assistant and bot-development mentor.
+Reply in the same language the user writes in (Hinglish is fine). Keep answers short and practical.
 
-You are AGENTIC: when the user gives you a goal (e.g. "build me a bot that...", "fix this error",
-"research X and summarize"), you break it into steps yourself and execute them one by one using
-your tools, without asking the user to do each step manually. Keep going, calling tools as needed,
-until the task is actually done or you hit a real blocker you cannot solve - then explain clearly
-what you did and what's left.
-
-For simple questions, just answer directly without over-using tools.
-
-Available tools:
-- read_file / write_file: work with files on this device
-- run_shell: run terminal commands (install packages, run scripts, test code)
-- browse: fetch and read a public web page
-- make_call / send_sms / notify: control this phone (calls, texts, notifications)
+Knowledge base (Bot Development Guide):
+- Bot = automated program doing tasks without a human. Types: chatbots, automation bots
+  (Selenium, Puppeteer, Playwright), trading bots, AI bots, voice bots, game bots.
+- Learn Python first. Playwright is the recommended tool for web automation.
+- Steps: 1) define goal, 2) pick platform, 3) find right tech, 4) automate GUI if no API exists.
 
 Rules:
-- Only automate things the user owns or has permission for (their own accounts, public data,
-  official APIs). Refuse to bypass anti-bot protections or break a site's terms of service -
-  explain the concept and suggest the official API instead.
-- Before running a potentially destructive shell command (delete, overwrite important files,
-  reinstall system packages), briefly state what it will do.
-- Be concise. Summarize progress after multi-step work instead of showing raw logs."""
+- Help build legitimate automation only. No bypassing anti-bot protections against terms of service.
+- Use tools when the user wants something done. Explain what you are doing in one line."""
 
 TOOLS = [
     {"type": "function", "function": {"name": "read_file", "description": "Read a text file.",
      "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "write_file", "description": "Create or overwrite a text file.",
      "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
-    {"type": "function", "function": {"name": "run_shell", "description": "Run a shell command (install packages, run scripts, tests).",
-     "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
     {"type": "function", "function": {"name": "browse", "description": "Fetch a public web page and return readable text.",
      "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}}},
-    {"type": "function", "function": {"name": "make_call", "description": "Dial a phone number on this device.",
-     "parameters": {"type": "object", "properties": {"number": {"type": "string"}}, "required": ["number"]}}},
-    {"type": "function", "function": {"name": "send_sms", "description": "Send an SMS to a phone number.",
-     "parameters": {"type": "object", "properties": {"number": {"type": "string"}, "message": {"type": "string"}}, "required": ["number", "message"]}}},
-    {"type": "function", "function": {"name": "notify", "description": "Show an Android notification.",
-     "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "message": {"type": "string"}}, "required": ["title", "message"]}}},
 ]
 
 
@@ -57,25 +38,12 @@ def run_tool(name, args):
             with open(args["path"], "w", encoding="utf-8") as f:
                 f.write(args["content"])
             return "File written: " + args["path"]
-        if name == "run_shell":
-            r = subprocess.run(args["command"], shell=True, capture_output=True, text=True, timeout=180)
-            out = (r.stdout + r.stderr).strip()
-            return out[-6000:] if out else "(command ran, no output)"
         if name == "browse":
             req = urllib.request.Request(args["url"], headers={"User-Agent": "Mozilla/5.0"})
             html = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
             html = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html)
             text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
             return text[:15000]
-        if name == "make_call":
-            subprocess.run(["termux-telephony-call", args["number"]], timeout=10)
-            return "Calling " + args["number"]
-        if name == "send_sms":
-            subprocess.run(["termux-sms-send", "-n", args["number"], args["message"]], timeout=15)
-            return "SMS sent to " + args["number"]
-        if name == "notify":
-            subprocess.run(["termux-notification", "--title", args["title"], "--content", args["message"]], timeout=10)
-            return "Notification shown"
         return "Unknown tool: " + name
     except Exception as e:
         return "Error: " + str(e)
@@ -83,7 +51,7 @@ def run_tool(name, args):
 
 def call_api(messages):
     body = json.dumps({"model": MODEL, "messages": messages, "tools": TOOLS,
-                        "tool_choice": "auto", "max_tokens": 3000}).encode()
+                        "tool_choice": "auto", "max_tokens": 2000}).encode()
     req = urllib.request.Request(
         "https://api.groq.com/openai/v1/chat/completions", data=body,
         headers={"content-type": "application/json", "authorization": "Bearer " + API_KEY,
@@ -93,17 +61,32 @@ def call_api(messages):
 
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET", "change-this-secret-key-too")
 sessions = {}
-MAX_AGENT_STEPS = 15  # how many tool-calls in a row the agent can do for one task
 
 
-@app.route("/")
+@app.route("/", methods=["GET", "POST"])
 def home():
+    if request.method == "POST":
+        if request.form.get("password") == JARVIS_PASSWORD:
+            session["logged_in"] = True
+            return redirect(url_for("home"))
+        return render_template("login.html", error="Wrong password")
+    if not session.get("logged_in"):
+        return render_template("login.html", error=None)
     return render_template("index.html")
+
+
+@app.route("/logout")
+def logout():
+    session.pop("logged_in", None)
+    return redirect(url_for("home"))
 
 
 @app.route("/chat", methods=["POST"])
 def chat():
+    if not session.get("logged_in"):
+        return jsonify({"reply": "Please login first."}), 401
     data = request.json
     user_msg = data.get("message", "")
     sid = data.get("session", "default")
@@ -111,29 +94,25 @@ def chat():
         sessions[sid] = [{"role": "system", "content": SYSTEM}]
     messages = sessions[sid]
     messages.append({"role": "user", "content": user_msg})
-
-    steps_log = []
+    replies = []
     try:
-        for step in range(MAX_AGENT_STEPS):
+        for _ in range(6):
             resp = call_api(messages)
             msg = resp["choices"][0]["message"]
             messages.append(msg)
+            if msg.get("content"):
+                replies.append(msg["content"])
             tool_calls = msg.get("tool_calls")
-
             if not tool_calls:
-                final_text = msg.get("content") or "(done)"
-                return jsonify({"reply": final_text, "steps": steps_log})
-
+                break
             for tc in tool_calls:
                 fn = tc["function"]
                 args = json.loads(fn["arguments"] or "{}")
                 result = run_tool(fn["name"], args)
-                steps_log.append(fn["name"] + "(" + json.dumps(args)[:80] + ")")
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
-
-        return jsonify({"reply": "Task bahut lamba ho gaya, jitna ho saka kiya. Thoda aur specific bolo to main aage continue karunga.", "steps": steps_log})
     except Exception as e:
-        return jsonify({"reply": "Error: " + str(e), "steps": steps_log})
+        return jsonify({"reply": "Error: " + str(e)})
+    return jsonify({"reply": "\n\n".join(replies) or "(no reply)"})
 
 
 if __name__ == "__main__":
