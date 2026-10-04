@@ -10,27 +10,33 @@
   header { text-align:center; padding:18px; background:rgba(0,0,0,0.35); }
   header h1 { margin:0; font-size:24px; background:linear-gradient(90deg,#00d2ff,#3a7bd5); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
   header p { margin:4px 0 0; font-size:12px; color:#9aa; }
+  header a { color:#00d2ff; font-size:12px; }
   #chat { flex:1; overflow-y:auto; padding:16px; max-width:800px; margin:0 auto; width:100%; }
   .msg { max-width:85%; margin:10px 0; padding:12px 16px; border-radius:16px; line-height:1.5; white-space:pre-wrap; font-size:15px; }
   .user { background:linear-gradient(135deg,#3a7bd5,#00d2ff); color:#fff; margin-left:auto; border-bottom-right-radius:4px; }
   .bot { background:rgba(255,255,255,0.08); color:#eee; margin-right:auto; border-bottom-left-radius:4px; }
-  #inputBar { display:flex; padding:14px; background:rgba(0,0,0,0.35); max-width:800px; margin:0 auto; width:100%; }
-  #inputBox { flex:1; padding:14px; border-radius:24px; border:none; font-size:16px; background:rgba(255,255,255,0.1); color:#fff; }
-  #micBtn { margin-left:8px; padding:12px 16px; border-radius:50%; border:none; background:#555; color:#fff; font-size:18px; cursor:pointer; }
-  #micBtn.listening { background:#ff3b3b; animation:pulse 1s infinite; }
-  @keyframes pulse { 0%{opacity:1;} 50%{opacity:0.5;} 100%{opacity:1;} }
-  #sendBtn { margin-left:8px; padding:12px 20px; border-radius:24px; border:none; background:linear-gradient(135deg,#3a7bd5,#00d2ff); color:#fff; font-size:16px; cursor:pointer; }
+  .confirmBox { margin-top:10px; display:flex; gap:8px; }
+  .confirmBox button { padding:8px 14px; border-radius:16px; border:none; cursor:pointer; font-size:13px; }
+  .yesBtn { background:#2ecc71; color:#fff; }
+  .noBtn { background:#e74c3c; color:#fff; }
+  #inputBar { display:flex; flex-wrap:wrap; gap:8px; padding:14px; background:rgba(0,0,0,0.35); max-width:800px; margin:0 auto; width:100%; align-items:center; }
+  #inputBox { flex:1; min-width:120px; padding:14px; border-radius:24px; border:none; font-size:16px; background:rgba(255,255,255,0.1); color:#fff; }
+  #micBtn { padding:14px 18px; border-radius:50%; border:3px solid #00d2ff; background:#1c1c3a; color:#fff; font-size:20px; cursor:pointer; min-width:54px; }
+  #micBtn.listening { background:#ff3b3b; border-color:#ff3b3b; animation:pulse 1s infinite; }
+  @keyframes pulse { 0%{opacity:1;} 50%{opacity:0.4;} 100%{opacity:1;} }
+  #sendBtn { padding:14px 22px; border-radius:24px; border:none; background:linear-gradient(135deg,#3a7bd5,#00d2ff); color:#fff; font-size:16px; cursor:pointer; }
+  #voiceStatus { text-align:center; padding:6px; font-size:12px; color:#ffcc00; min-height:16px; }
   #voiceToggle { text-align:center; padding:6px; font-size:12px; color:#9aa; }
-  #voiceToggle input { margin-right:6px; }
 </style>
 </head>
 <body>
-<header><h1>🤖 JARVIS</h1><p>Your Personal AI Assistant</p></header>
-<div id="voiceToggle"><label><input type="checkbox" id="autoSpeak" checked> Jarvis bole jawab zor se (auto-speak)</label></div>
+<header><h1>🤖 JARVIS</h1><p>Your Personal AI Assistant — <a href="/dashboard">Dashboard</a></p></header>
+<div id="voiceToggle"><label><input type="checkbox" id="autoSpeak" checked> Jarvis bole jawab zor se</label></div>
+<div id="voiceStatus"></div>
 <div id="chat"></div>
 <div id="inputBar">
-  <input id="inputBox" placeholder="Type or press mic..." autocomplete="off">
-  <button id="micBtn">🎤</button>
+  <input id="inputBox" placeholder="Type a message..." autocomplete="off">
+  <button id="micBtn" title="Tap and speak">🎤</button>
   <button id="sendBtn">Send</button>
 </div>
 <script>
@@ -39,6 +45,7 @@ const inputBox = document.getElementById('inputBox');
 const sendBtn = document.getElementById('sendBtn');
 const micBtn = document.getElementById('micBtn');
 const autoSpeak = document.getElementById('autoSpeak');
+const voiceStatus = document.getElementById('voiceStatus');
 const session = 'sess_' + Math.random().toString(36).slice(2);
 
 function addMsg(text, cls) {
@@ -69,20 +76,37 @@ function startTimer(seconds, label) {
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       const osc = ctx.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.value = 880;
-      osc.connect(ctx.destination);
-      osc.start();
+      osc.type = 'sine'; osc.frequency.value = 880;
+      osc.connect(ctx.destination); osc.start();
       setTimeout(() => osc.stop(), 600);
     } catch (e) {}
-    if ('Notification' in window && Notification.permission === 'granted') {
-      new Notification('Jarvis Timer', { body: label });
-    }
   }, seconds * 1000);
 }
 
-if ('Notification' in window && Notification.permission !== 'granted') {
-  Notification.requestPermission();
+function showConfirm(bubble, confirmData) {
+  const box = document.createElement('div');
+  box.className = 'confirmBox';
+  const yes = document.createElement('button');
+  yes.className = 'yesBtn'; yes.textContent = '✅ Haan karo';
+  const no = document.createElement('button');
+  no.className = 'noBtn'; no.textContent = '❌ Nahi';
+  box.appendChild(yes); box.appendChild(no);
+  bubble.appendChild(box);
+
+  async function respond(approved) {
+    box.remove();
+    const loading = addMsg('...', 'bot');
+    const res = await fetch('/confirm', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: confirmData.id, approved: approved})
+    });
+    const data = await res.json();
+    loading.textContent = data.reply;
+    speakText(data.reply);
+  }
+  yes.onclick = () => respond(true);
+  no.onclick = () => respond(false);
 }
 
 async function send() {
@@ -100,9 +124,8 @@ async function send() {
     const data = await res.json();
     loading.textContent = data.reply;
     speakText(data.reply);
-    if (data.timer) {
-      startTimer(data.timer.seconds, data.timer.label);
-    }
+    if (data.timer) startTimer(data.timer.seconds, data.timer.label);
+    if (data.confirm) showConfirm(loading, data.confirm);
   } catch (e) {
     loading.textContent = 'Connection error.';
   }
@@ -111,33 +134,22 @@ async function send() {
 sendBtn.onclick = send;
 inputBox.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 
-// Voice input via browser's built-in speech recognition
-let recog = null;
-if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  recog = new SR();
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (SR) {
+  const recog = new SR();
   recog.lang = 'en-IN';
   recog.interimResults = false;
-  recog.maxAlternatives = 1;
-
-  recog.onstart = () => micBtn.classList.add('listening');
-  recog.onend = () => micBtn.classList.remove('listening');
-  recog.onerror = () => micBtn.classList.remove('listening');
-
-  recog.onresult = e => {
-    const transcript = e.results[0][0].transcript;
-    inputBox.value = transcript;
-    send();
-  };
-
-  micBtn.onclick = () => {
-    try { recog.start(); } catch (e) {}
-  };
+  recog.onstart = () => { micBtn.classList.add('listening'); voiceStatus.textContent = '🎙️ Listening...'; };
+  recog.onend = () => { micBtn.classList.remove('listening'); voiceStatus.textContent = ''; };
+  recog.onerror = (e) => { micBtn.classList.remove('listening'); voiceStatus.textContent = 'Mic error: ' + e.error; };
+  recog.onresult = (e) => { inputBox.value = e.results[0][0].transcript; send(); };
+  micBtn.addEventListener('click', () => { try { recog.start(); } catch (err) {} });
 } else {
-  micBtn.style.display = 'none';
+  voiceStatus.textContent = '⚠️ Chrome use karo voice ke liye.';
+  micBtn.style.opacity = '0.4';
 }
 
-addMsg("Hi Boss! Main Jarvis hoon. Type karo ya mic dabake bolo.", "bot");
+addMsg("Hi Boss! Main Jarvis hoon. Ab web search aur permission-based actions bhi kar sakta hoon.", "bot");
 </script>
 </body>
 </html>

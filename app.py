@@ -1,9 +1,11 @@
-import os, re, json, time, sqlite3, urllib.request, urllib.error
+import os, re, json, time, sqlite3, uuid, urllib.request, urllib.error, urllib.parse
 from flask import Flask, request, jsonify, render_template
 
 MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 API_KEY = os.environ.get("GROQ_API_KEY")
 DB_PATH = os.environ.get("JARVIS_DB", "jarvis_memory.db")
+
+RISKY_TOOLS = {"write_file", "forget_fact", "delete_task"}
 
 SYSTEM = """You are JARVIS, a personal AI assistant. Address the user as "Boss".
 Personality: intelligent, calm, professional, helpful, slightly witty, concise. Never pretend to be
@@ -12,12 +14,14 @@ conscious or sentient. Reply in the same language the user writes in (Hinglish i
 Always clearly distinguish: known facts, your inference/guess, actions you actually performed
 (confirm what tool ran and the real result), and actions that failed (say clearly, don't pretend).
 
-You have long-term memory (remember_fact/recall_memory/forget_fact) and a task/reminder system
-(add_task/list_tasks/complete_task/delete_task, add_reminder/list_reminders). Use them proactively
-when the user mentions things to remember, do, or be reminded about.
+You have long-term memory (remember_fact/recall_memory/forget_fact), a task/reminder system
+(add_task/list_tasks/complete_task/delete_task, add_reminder/list_reminders), a short countdown
+timer (set_timer, only for short durations like seconds/minutes), and real web search (search_web)
+plus page fetching (browse) for research.
 
-Before doing a destructive action (delete_task, forget_fact, overwrite an existing file), briefly
-state what you're about to do in your reply. Don't silently destroy data.
+Some actions (overwriting a file, forgetting a memory, deleting a task) require user confirmation -
+the system will automatically pause and ask the user before running them, so just call the tool
+normally and explain why you want to do it.
 
 Knowledge base (Bot Development Guide):
 - Bot = automated program doing tasks without a human. Chatbots, automation bots (Selenium,
@@ -33,29 +37,31 @@ Rules:
 TOOLS = [
     {"type": "function", "function": {"name": "read_file", "description": "Read a text file.",
      "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
-    {"type": "function", "function": {"name": "write_file", "description": "Create or overwrite a text file.",
+    {"type": "function", "function": {"name": "write_file", "description": "Create or overwrite a text file. Requires user confirmation.",
      "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
-    {"type": "function", "function": {"name": "browse", "description": "Fetch a public web page and return readable text.",
+    {"type": "function", "function": {"name": "browse", "description": "Fetch a specific public web page URL and return readable text.",
      "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}}},
+    {"type": "function", "function": {"name": "search_web", "description": "Search the internet for a query and return results (titles, links, snippets).",
+     "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "remember_fact", "description": "Save an important fact to long-term memory.",
      "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
     {"type": "function", "function": {"name": "recall_memory", "description": "Search long-term memory for relevant facts.",
      "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
-    {"type": "function", "function": {"name": "forget_fact", "description": "Delete a fact from memory by key.",
+    {"type": "function", "function": {"name": "forget_fact", "description": "Delete a fact from memory by key. Requires user confirmation.",
      "parameters": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}}},
     {"type": "function", "function": {"name": "add_task", "description": "Add a task/todo item.",
      "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "project": {"type": "string"}}, "required": ["title"]}}},
-    {"type": "function", "function": {"name": "list_tasks", "description": "List all pending tasks, optionally filtered by project.",
+    {"type": "function", "function": {"name": "list_tasks", "description": "List pending tasks.",
      "parameters": {"type": "object", "properties": {"project": {"type": "string"}}}}},
-    {"type": "function", "function": {"name": "complete_task", "description": "Mark a task as done by its id.",
+    {"type": "function", "function": {"name": "complete_task", "description": "Mark a task done by its id.",
      "parameters": {"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]}}},
-    {"type": "function", "function": {"name": "delete_task", "description": "Delete a task by its id.",
+    {"type": "function", "function": {"name": "delete_task", "description": "Delete a task by id. Requires user confirmation.",
      "parameters": {"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]}}},
-    {"type": "function", "function": {"name": "add_reminder", "description": "Add a reminder with a due time description.",
+    {"type": "function", "function": {"name": "add_reminder", "description": "Add a reminder with a due description.",
      "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "due": {"type": "string"}}, "required": ["text", "due"]}}},
     {"type": "function", "function": {"name": "list_reminders", "description": "List all reminders.",
      "parameters": {"type": "object", "properties": {}}}},
-    {"type": "function", "function": {"name": "set_timer", "description": "Start a live countdown timer in the browser that alerts the user with sound after N seconds. Use this for short timers like 'remind me in 5 seconds/minutes', not for long-term reminders.",
+    {"type": "function", "function": {"name": "set_timer", "description": "Start a live countdown timer (seconds) that alerts in the browser. Short durations only.",
      "parameters": {"type": "object", "properties": {"seconds": {"type": "integer"}, "label": {"type": "string"}}, "required": ["seconds", "label"]}}},
 ]
 
@@ -63,12 +69,9 @@ TOOLS = [
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("CREATE TABLE IF NOT EXISTS memory (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
-    conn.execute("""CREATE TABLE IF NOT EXISTS audit_log
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, tool TEXT, args TEXT, result TEXT)""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS tasks
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, project TEXT, done INTEGER DEFAULT 0, created_at TEXT)""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS reminders
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, due TEXT, created_at TEXT)""")
+    conn.execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, tool TEXT, args TEXT, result TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, project TEXT, done INTEGER DEFAULT 0, created_at TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, due TEXT, created_at TEXT)")
     return conn
 
 
@@ -77,10 +80,17 @@ def log_action(tool, args, result):
         conn = db()
         conn.execute("INSERT INTO audit_log (ts, tool, args, result) VALUES (?,?,?,?)",
                       (time.strftime("%Y-%m-%d %H:%M:%S"), tool, json.dumps(args)[:500], str(result)[:500]))
-        conn.commit()
-        conn.close()
+        conn.commit(); conn.close()
     except Exception:
         pass
+
+
+def fetch_text(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    html = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "ignore")
+    html = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html)
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
+    return text
 
 
 def run_tool(name, args):
@@ -97,21 +107,21 @@ def run_tool(name, args):
             if not re.match(r"^https?://", args["url"]):
                 result = "Error: only http/https URLs allowed"
             else:
-                req = urllib.request.Request(args["url"], headers={"User-Agent": "Mozilla/5.0"})
-                html = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "ignore")
-                html = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html)
-                text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
-                result = text[:15000]
+                result = fetch_text(args["url"])[:15000]
+        elif name == "search_web":
+            q = urllib.parse.quote(args["query"])
+            url = "https://html.duckduckgo.com/html/?q=" + q
+            result = fetch_text(url)[:8000]
         elif name == "remember_fact":
             conn = db()
             conn.execute("INSERT OR REPLACE INTO memory (key, value, updated_at) VALUES (?,?,?)",
-                         (args["key"], args["value"], time.strftime("%Y-%m-%d %H:%M:%S")))
+                        (args["key"], args["value"], time.strftime("%Y-%m-%d %H:%M:%S")))
             conn.commit(); conn.close()
             result = "Remembered: " + args["key"]
         elif name == "recall_memory":
             conn = db()
             rows = conn.execute("SELECT key, value FROM memory WHERE key LIKE ? OR value LIKE ?",
-                                 (f"%{args['query']}%", f"%{args['query']}%")).fetchall()
+                                (f"%{args['query']}%", f"%{args['query']}%")).fetchall()
             conn.close()
             result = json.dumps([{"key": k, "value": v} for k, v in rows]) if rows else "No matching memory found."
         elif name == "forget_fact":
@@ -128,9 +138,9 @@ def run_tool(name, args):
         elif name == "list_tasks":
             conn = db()
             if args.get("project"):
-                rows = conn.execute("SELECT id, title, project, done FROM tasks WHERE project=? AND done=0", (args["project"],)).fetchall()
+                rows = conn.execute("SELECT id, title, project FROM tasks WHERE project=? AND done=0", (args["project"],)).fetchall()
             else:
-                rows = conn.execute("SELECT id, title, project, done FROM tasks WHERE done=0").fetchall()
+                rows = conn.execute("SELECT id, title, project FROM tasks WHERE done=0").fetchall()
             conn.close()
             result = json.dumps([{"id": r[0], "title": r[1], "project": r[2]} for r in rows]) if rows else "No pending tasks."
         elif name == "complete_task":
@@ -177,6 +187,7 @@ def call_api(messages):
 
 app = Flask(__name__)
 sessions = {}
+pending = {}
 last_request_time = {}
 RATE_LIMIT_SECONDS = 3
 
@@ -206,6 +217,7 @@ def chat():
     messages.append({"role": "user", "content": user_msg})
     replies = []
     timer_info = None
+    confirm_info = None
     try:
         for _ in range(8):
             resp = call_api(messages)
@@ -216,19 +228,84 @@ def chat():
             tool_calls = msg.get("tool_calls")
             if not tool_calls:
                 break
+
+            paused = False
             for tc in tool_calls:
                 fn = tc["function"]
                 args = json.loads(fn["arguments"] or "{}")
-                result = run_tool(fn["name"], args)
-                if fn["name"] == "set_timer":
-                    timer_info = {"seconds": args["seconds"], "label": args["label"]}
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
+
+                if fn["name"] in RISKY_TOOLS and not paused:
+                    conf_id = str(uuid.uuid4())[:8]
+                    pending[conf_id] = {"sid": sid, "name": fn["name"], "args": args}
+                    confirm_info = {"id": conf_id, "tool": fn["name"], "args": args}
+                    messages.append({"role": "tool", "tool_call_id": tc["id"],
+                                      "content": "[Waiting for user confirmation before executing]"})
+                    paused = True
+                elif paused:
+                    messages.append({"role": "tool", "tool_call_id": tc["id"],
+                                      "content": "[Skipped - waiting for a prior confirmation]"})
+                else:
+                    result = run_tool(fn["name"], args)
+                    if fn["name"] == "set_timer":
+                        timer_info = {"seconds": args["seconds"], "label": args["label"]}
+                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
+
+            if paused:
+                break
     except Exception as e:
         return jsonify({"reply": "Error: " + str(e)})
+
     out = {"reply": "\n\n".join(replies) or "(no reply)"}
     if timer_info:
         out["timer"] = timer_info
+    if confirm_info:
+        out["confirm"] = confirm_info
     return jsonify(out)
+
+
+@app.route("/confirm", methods=["POST"])
+def confirm():
+    data = request.json or {}
+    conf_id = data.get("id")
+    approved = bool(data.get("approved"))
+    pend = pending.pop(conf_id, None)
+    if not pend:
+        return jsonify({"reply": "Ye confirmation expire ho gayi, Boss."})
+
+    sid = pend["sid"]
+    messages = sessions.get(sid)
+    if not messages:
+        return jsonify({"reply": "Session expire ho gayi, Boss."})
+
+    if approved:
+        result = run_tool(pend["name"], pend["args"])
+    else:
+        result = "User declined this action."
+
+    messages.append({"role": "user", "content": "[System: confirmation result for " + pend["name"] + ": " + str(result) + "]"})
+    replies = []
+    try:
+        for _ in range(4):
+            resp = call_api(messages)
+            msg = resp["choices"][0]["message"]
+            messages.append(msg)
+            if msg.get("content"):
+                replies.append(msg["content"])
+            tool_calls = msg.get("tool_calls")
+            if not tool_calls:
+                break
+            for tc in tool_calls:
+                fn = tc["function"]
+                a = json.loads(fn["arguments"] or "{}")
+                if fn["name"] in RISKY_TOOLS:
+                    r = "Please ask again to confirm this new action separately."
+                else:
+                    r = run_tool(fn["name"], a)
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": str(r)})
+    except Exception as e:
+        return jsonify({"reply": "Error: " + str(e)})
+
+    return jsonify({"reply": "\n\n".join(replies) or str(result)})
 
 
 @app.route("/dashboard")
