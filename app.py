@@ -2,6 +2,7 @@ import os, re, json, time, sqlite3, uuid, urllib.request, urllib.error, urllib.p
 from flask import Flask, request, jsonify, render_template
 
 MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
 API_KEY = os.environ.get("GROQ_API_KEY")
 DB_PATH = os.environ.get("JARVIS_DB", "jarvis_memory.db")
 
@@ -16,36 +17,20 @@ Always clearly distinguish: known facts, your inference/guess, actions you actua
 
 You have long-term memory (remember_fact/recall_memory/forget_fact), a task/reminder system
 (add_task/list_tasks/complete_task/delete_task, add_reminder/list_reminders), a short countdown
-timer (set_timer, only for short durations like seconds/minutes), and real web search (search_web)
-plus page fetching (browse) for research.
+timer (set_timer, only for short durations), and real web search (search_web) plus page fetching
+(browse, max 2 per turn) for research.
 
-AGENTIC PLANNING: When the user gives you a multi-step GOAL (not just a simple question), silently
-plan the steps needed and execute them one by one by calling tools, without asking the user to
-confirm each individual step (except the specific actions that always need confirmation: write_file,
-forget_fact, delete_task). Keep working through the steps in the same turn until the goal is done or
-you hit a real blocker. If a tool call fails, try an alternative approach once before giving up and
-explaining the failure clearly to the user. When finished, give a short, clear summary of what was
-actually done - don't just describe a plan, report real results.
+AGENTIC PLANNING: When the user gives a multi-step GOAL, silently plan and execute the steps by
+calling tools, without asking confirmation for each step (except write_file, forget_fact,
+delete_task which always need confirmation). Keep working until the goal is done or you hit a real
+blocker. If a tool fails, try an alternative once before explaining the failure. Give a short, clear
+summary of what was ACTUALLY done at the end - report real results, not just a plan.
 
 For simple direct questions, just answer directly without overusing tools.
 
-Some actions (overwriting a file, forgetting a memory, deleting a task) require user confirmation.
-IMPORTANT: You must still actually CALL the tool (write_file, forget_fact, delete_task) when the user
-asks for it - do NOT just describe it in text and wait. The system automatically intercepts these
-specific tool calls and shows a Yes/No confirmation button to the user before really executing them.
-If you only describe the action in text without calling the tool, nothing will happen. So always call
-the tool itself, then briefly explain what you're doing in the same turn.
-
-Knowledge base (Bot Development Guide):
-- Bot = automated program doing tasks without a human. Chatbots, automation bots (Selenium,
-  Playwright), trading bots, AI bots, voice bots, game bots. Learn Python first.
-- Steps for any bot: 1) define goal, 2) pick platform, 3) find right tech, 4) automate GUI if no API.
-- Playwright recommended for web automation.
-
 Rules:
 - Only help with legitimate automation (own accounts, public data, official APIs).
-- Refuse to bypass anti-bot protections or break terms of service.
-- Use tools when the user wants something done; explain briefly what you're doing."""
+- Refuse to bypass anti-bot protections or break terms of service."""
 
 TOOLS = [
     {"type": "function", "function": {"name": "read_file", "description": "Read a text file.",
@@ -54,7 +39,7 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
     {"type": "function", "function": {"name": "browse", "description": "Fetch a specific public web page URL and return readable text.",
      "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}}},
-    {"type": "function", "function": {"name": "search_web", "description": "Search the internet for a query and return results (titles, links, snippets).",
+    {"type": "function", "function": {"name": "search_web", "description": "Search the internet for a query and return results.",
      "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "remember_fact", "description": "Save an important fact to long-term memory.",
      "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
@@ -74,7 +59,7 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "due": {"type": "string"}}, "required": ["text", "due"]}}},
     {"type": "function", "function": {"name": "list_reminders", "description": "List all reminders.",
      "parameters": {"type": "object", "properties": {}}}},
-    {"type": "function", "function": {"name": "set_timer", "description": "Start a live countdown timer (seconds) that alerts in the browser. Short durations only.",
+    {"type": "function", "function": {"name": "set_timer", "description": "Start a live countdown timer (seconds) that alerts in the browser.",
      "parameters": {"type": "object", "properties": {"seconds": {"type": "integer"}, "label": {"type": "string"}}, "required": ["seconds", "label"]}}},
 ]
 
@@ -120,14 +105,13 @@ def run_tool(name, args, browse_count=[0]):
             if not re.match(r"^https?://", args["url"]):
                 result = "Error: only http/https URLs allowed"
             elif browse_count[0] >= 2:
-                result = "Browse limit reached for this turn (max 2). Use search_web instead or ask user to continue."
+                result = "Browse limit reached for this turn (max 2). Use search_web instead."
             else:
                 browse_count[0] += 1
                 result = fetch_text(args["url"])[:10000]
         elif name == "search_web":
             query = args["query"]
             result = None
-            # Try 1: Wikipedia summary (fast, reliable, no blocking)
             try:
                 wiki_url = "https://en.wikipedia.org/api/rest_v1/page/summary/" + urllib.parse.quote(query.replace(" ", "_"))
                 req = urllib.request.Request(wiki_url, headers={"User-Agent": "Mozilla/5.0"})
@@ -136,7 +120,6 @@ def run_tool(name, args, browse_count=[0]):
                     result = "Wikipedia: " + data["extract"]
             except Exception:
                 pass
-            # Try 2: DuckDuckGo Instant Answer API (JSON, less likely to be blocked)
             if not result:
                 try:
                     ddg_url = "https://api.duckduckgo.com/?q=" + urllib.parse.quote(query) + "&format=json&no_html=1"
@@ -150,13 +133,12 @@ def run_tool(name, args, browse_count=[0]):
                         result = "Search result: " + text
                 except Exception:
                     pass
-            # Try 3: DuckDuckGo lite HTML as last resort
             if not result:
                 try:
                     url = "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote(query)
                     result = "Search result: " + fetch_text(url)[:3000]
                 except Exception as se:
-                    result = "Search failed on all methods. Could not find real-time info for: " + query + ". Please answer from general knowledge and clearly say it may not be up to date."
+                    result = "Search failed. Answer from general knowledge and mention it may not be current."
         elif name == "remember_fact":
             conn = db()
             conn.execute("INSERT OR REPLACE INTO memory (key, value, updated_at) VALUES (?,?,?)",
@@ -226,11 +208,32 @@ def call_api(messages):
         "https://api.groq.com/openai/v1/chat/completions", data=body,
         headers={"content-type": "application/json", "authorization": "Bearer " + API_KEY,
                  "user-agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=120) as r:
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read())
+
+
+def call_vision_api(image_b64, text):
+    body = json.dumps({
+        "model": VISION_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are JARVIS analyzing an image for your Boss. Be clear and concise. If it's an error/screenshot, identify the problem and suggest a fix. Address the user as Boss."},
+            {"role": "user", "content": [
+                {"type": "text", "text": text or "What do you see in this image? Describe it clearly."},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + image_b64}}
+            ]}
+        ],
+        "max_tokens": 800
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions", data=body,
+        headers={"content-type": "application/json", "authorization": "Bearer " + API_KEY,
+                 "user-agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=60) as r:
         return json.loads(r.read())
 
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 sessions = {}
 pending = {}
 last_request_time = {}
@@ -286,11 +289,11 @@ def chat():
                     pending[conf_id] = {"sid": sid, "name": fn["name"], "args": args}
                     confirm_info = {"id": conf_id, "tool": fn["name"], "args": args}
                     messages.append({"role": "tool", "tool_call_id": tc["id"],
-                                      "content": "[Waiting for user confirmation before executing]"})
+                                      "content": "[Waiting for user confirmation]"})
                     paused = True
                 elif paused:
                     messages.append({"role": "tool", "tool_call_id": tc["id"],
-                                      "content": "[Skipped - waiting for a prior confirmation]"})
+                                      "content": "[Skipped - waiting for confirmation]"})
                 else:
                     result = run_tool(fn["name"], args)
                     steps_taken.append(fn["name"])
@@ -301,7 +304,7 @@ def chat():
             if paused:
                 break
         else:
-            replies.append("Boss, ye task bahut lamba ho gaya (10 steps complete). Jo ho saka kiya maine, thoda chhota goal do to aage continue kar sakta hoon.")
+            replies.append("Boss, ye task lamba ho gaya (10 steps). Chhota goal do to continue karu.")
     except Exception as e:
         return jsonify({"reply": "Error: " + str(e)})
 
@@ -315,6 +318,28 @@ def chat():
     return jsonify(out)
 
 
+@app.route("/vision", methods=["POST"])
+def vision():
+    data = request.json or {}
+    image_b64 = data.get("image", "")
+    text = str(data.get("message", ""))[:1000]
+    sid = str(data.get("session", "default"))[:100]
+    if not image_b64:
+        return jsonify({"reply": "Image nahi mili, Boss."})
+    try:
+        resp = call_vision_api(image_b64, text)
+        reply = resp["choices"][0]["message"]["content"]
+    except Exception as e:
+        return jsonify({"reply": "Vision analysis fail hua, Boss: " + str(e)})
+
+    if sid not in sessions:
+        sessions[sid] = [{"role": "system", "content": SYSTEM}]
+    sessions[sid].append({"role": "user", "content": "[Boss shared an image] " + (text or "(no caption)")})
+    sessions[sid].append({"role": "assistant", "content": reply})
+    log_action("vision_analysis", {"text": text}, reply[:200])
+    return jsonify({"reply": reply})
+
+
 @app.route("/confirm", methods=["POST"])
 def confirm():
     data = request.json or {}
@@ -322,7 +347,7 @@ def confirm():
     approved = bool(data.get("approved"))
     pend = pending.pop(conf_id, None)
     if not pend:
-        return jsonify({"reply": "Ye confirmation expire ho gayi, Boss."})
+        return jsonify({"reply": "Confirmation expire ho gayi, Boss."})
 
     sid = pend["sid"]
     messages = sessions.get(sid)
@@ -350,7 +375,7 @@ def confirm():
                 fn = tc["function"]
                 a = json.loads(fn["arguments"] or "{}")
                 if fn["name"] in RISKY_TOOLS:
-                    r = "Please ask again to confirm this new action separately."
+                    r = "Please ask again to confirm separately."
                 else:
                     r = run_tool(fn["name"], a)
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": str(r)})
