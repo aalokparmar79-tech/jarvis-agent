@@ -106,7 +106,7 @@ def fetch_text(url):
     return text
 
 
-def run_tool(name, args):
+def run_tool(name, args, browse_count=[0]):
     try:
         if name == "read_file":
             with open(args["path"], encoding="utf-8") as f:
@@ -119,15 +119,44 @@ def run_tool(name, args):
         elif name == "browse":
             if not re.match(r"^https?://", args["url"]):
                 result = "Error: only http/https URLs allowed"
+            elif browse_count[0] >= 2:
+                result = "Browse limit reached for this turn (max 2). Use search_web instead or ask user to continue."
             else:
-                result = fetch_text(args["url"])[:15000]
+                browse_count[0] += 1
+                result = fetch_text(args["url"])[:10000]
         elif name == "search_web":
-            q = urllib.parse.quote(args["query"])
-            url = "https://lite.duckduckgo.com/lite/?q=" + q
+            query = args["query"]
+            result = None
+            # Try 1: Wikipedia summary (fast, reliable, no blocking)
             try:
-                result = fetch_text(url)[:5000]
-            except Exception as se:
-                result = "Search failed (timeout or blocked): " + str(se)
+                wiki_url = "https://en.wikipedia.org/api/rest_v1/page/summary/" + urllib.parse.quote(query.replace(" ", "_"))
+                req = urllib.request.Request(wiki_url, headers={"User-Agent": "Mozilla/5.0"})
+                data = json.loads(urllib.request.urlopen(req, timeout=8).read().decode("utf-8", "ignore"))
+                if data.get("extract"):
+                    result = "Wikipedia: " + data["extract"]
+            except Exception:
+                pass
+            # Try 2: DuckDuckGo Instant Answer API (JSON, less likely to be blocked)
+            if not result:
+                try:
+                    ddg_url = "https://api.duckduckgo.com/?q=" + urllib.parse.quote(query) + "&format=json&no_html=1"
+                    req = urllib.request.Request(ddg_url, headers={"User-Agent": "Mozilla/5.0"})
+                    data = json.loads(urllib.request.urlopen(req, timeout=8).read().decode("utf-8", "ignore"))
+                    text = data.get("AbstractText") or data.get("Answer") or ""
+                    if not text and data.get("RelatedTopics"):
+                        topics = [t.get("Text", "") for t in data["RelatedTopics"][:3] if isinstance(t, dict)]
+                        text = " | ".join(t for t in topics if t)
+                    if text:
+                        result = "Search result: " + text
+                except Exception:
+                    pass
+            # Try 3: DuckDuckGo lite HTML as last resort
+            if not result:
+                try:
+                    url = "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote(query)
+                    result = "Search result: " + fetch_text(url)[:3000]
+                except Exception as se:
+                    result = "Search failed on all methods. Could not find real-time info for: " + query + ". Please answer from general knowledge and clearly say it may not be up to date."
         elif name == "remember_fact":
             conn = db()
             conn.execute("INSERT OR REPLACE INTO memory (key, value, updated_at) VALUES (?,?,?)",
