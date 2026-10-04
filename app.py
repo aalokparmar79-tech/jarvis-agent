@@ -55,6 +55,8 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "due": {"type": "string"}}, "required": ["text", "due"]}}},
     {"type": "function", "function": {"name": "list_reminders", "description": "List all reminders.",
      "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "set_timer", "description": "Start a live countdown timer in the browser that alerts the user with sound after N seconds. Use this for short timers like 'remind me in 5 seconds/minutes', not for long-term reminders.",
+     "parameters": {"type": "object", "properties": {"seconds": {"type": "integer"}, "label": {"type": "string"}}, "required": ["seconds", "label"]}}},
 ]
 
 
@@ -152,6 +154,8 @@ def run_tool(name, args):
             rows = conn.execute("SELECT id, text, due FROM reminders").fetchall()
             conn.close()
             result = json.dumps([{"id": r[0], "text": r[1], "due": r[2]} for r in rows]) if rows else "No reminders set."
+        elif name == "set_timer":
+            result = "Timer started: " + args["label"] + " for " + str(args["seconds"]) + " seconds"
         else:
             result = "Unknown tool: " + name
     except Exception as e:
@@ -201,6 +205,7 @@ def chat():
     messages = sessions[sid]
     messages.append({"role": "user", "content": user_msg})
     replies = []
+    timer_info = None
     try:
         for _ in range(8):
             resp = call_api(messages)
@@ -215,10 +220,15 @@ def chat():
                 fn = tc["function"]
                 args = json.loads(fn["arguments"] or "{}")
                 result = run_tool(fn["name"], args)
+                if fn["name"] == "set_timer":
+                    timer_info = {"seconds": args["seconds"], "label": args["label"]}
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
     except Exception as e:
         return jsonify({"reply": "Error: " + str(e)})
-    return jsonify({"reply": "\n\n".join(replies) or "(no reply)"})
+    out = {"reply": "\n\n".join(replies) or "(no reply)"}
+    if timer_info:
+        out["timer"] = timer_info
+    return jsonify(out)
 
 
 @app.route("/dashboard")

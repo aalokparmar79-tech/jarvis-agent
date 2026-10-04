@@ -61,6 +61,30 @@ function speakText(text) {
   speechSynthesis.speak(utter);
 }
 
+function startTimer(seconds, label) {
+  addMsg('⏱️ Timer started: ' + label + ' (' + seconds + 's)', 'bot');
+  setTimeout(() => {
+    addMsg('🔔 TIME UP: ' + label, 'bot');
+    speakText('Boss, time is up for ' + label);
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = 880;
+      osc.connect(ctx.destination);
+      osc.start();
+      setTimeout(() => osc.stop(), 600);
+    } catch (e) {}
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification('Jarvis Timer', { body: label });
+    }
+  }, seconds * 1000);
+}
+
+if ('Notification' in window && Notification.permission !== 'granted') {
+  Notification.requestPermission();
+}
+
 async function send() {
   const text = inputBox.value.trim();
   if (!text) return;
@@ -76,6 +100,9 @@ async function send() {
     const data = await res.json();
     loading.textContent = data.reply;
     speakText(data.reply);
+    if (data.timer) {
+      startTimer(data.timer.seconds, data.timer.label);
+    }
   } catch (e) {
     loading.textContent = 'Connection error.';
   }
